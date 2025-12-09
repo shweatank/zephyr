@@ -25,13 +25,10 @@
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/ethernet_vlan.h>
 #include <zephyr/net/ptp_time.h>
+#include <zephyr/random/random.h>
 
 #if defined(CONFIG_NET_DSA_DEPRECATED)
 #include <zephyr/net/dsa.h>
-#endif
-
-#if defined(CONFIG_NET_ETHERNET_BRIDGE)
-#include <zephyr/net/ethernet_bridge.h>
 #endif
 
 #if defined(CONFIG_NVMEM)
@@ -1328,6 +1325,54 @@ struct net_eth_mac_config {
 #endif
 };
 
+/**
+ * @brief Load a MAC address from a MAC address configuration structure with the specified type.
+ *
+ * In the case of a randomized MAC address, the universal vs local (U/L) bit is set to a
+ * locally administered address (LAA) and the unicast vs multicast (I/G) bit is cleared to make it
+ * a unicast address.
+ *
+ * @param cfg The MAC address configuration.
+ * @param mac_addr The resulting MAC address buffer, needs a size of @ref NET_ETH_ADDR_LEN bytes.
+ *
+ * @retval -ENODATA No MAC address configuration data is loaded.
+ * @retval <0 Negative errno code if failure.
+ * @retval 0 If successful.
+ */
+static inline int net_eth_mac_load(const struct net_eth_mac_config *cfg, uint8_t *mac_addr)
+{
+	if (cfg == NULL || cfg->type == NET_ETH_MAC_DEFAULT) {
+		return -ENODATA;
+	}
+
+	/* Copy the static part */
+	memcpy(mac_addr, cfg->addr, cfg->addr_len);
+
+	if (cfg->type == NET_ETH_MAC_RANDOM) {
+		sys_rand_get(&mac_addr[cfg->addr_len], NET_ETH_ADDR_LEN - cfg->addr_len);
+
+		/* Clear group bit, multicast (I/G) */
+		mac_addr[0] &= ~0x01;
+		/* Set MAC address locally administered, unicast (LAA) */
+		mac_addr[0] |= 0x02;
+
+		return 0;
+	}
+
+#if defined(CONFIG_NVMEM)
+	if (cfg->type == NET_ETH_MAC_NVMEM) {
+		return nvmem_cell_read(&cfg->cell, &mac_addr[cfg->addr_len], 0,
+				       NET_ETH_ADDR_LEN - cfg->addr_len);
+	}
+#endif
+
+	if (cfg->type == NET_ETH_MAC_STATIC) {
+		return 0;
+	}
+
+	return -ENODATA;
+}
+
 /** @cond INTERNAL_HIDDEN */
 
 #if defined(CONFIG_NVMEM) || defined(__DOXYGEN__)
@@ -1378,14 +1423,13 @@ struct net_eth_mac_config {
  * @param node_id Node identifier.
  */
 #define NET_ETH_MAC_DT_CONFIG_INIT(node_id)                                                        \
-	COND_CODE_1(DT_PROP(node_id, zephyr_random_mac_address),                                   \
+	COND_CASE_1(DT_PROP(node_id, zephyr_random_mac_address),                                   \
 		    (Z_NET_ETH_MAC_DT_CONFIG_INIT_RANDOM(node_id)),                                \
-		    (COND_CODE_1(DT_NVMEM_CELLS_HAS_NAME(node_id, mac_address),                    \
-				 (Z_NET_ETH_MAC_DT_CONFIG_INIT_NVMEM(node_id)),                    \
-				 (COND_CODE_1(DT_NODE_HAS_PROP(node_id, local_mac_address),        \
-					      (Z_NET_ETH_MAC_DT_CONFIG_INIT_STATIC(node_id)),      \
-					      (Z_NET_ETH_MAC_DT_CONFIG_INIT_DEFAULT(node_id)))))))
-
+		    DT_NVMEM_CELLS_HAS_NAME(node_id, mac_address),                                 \
+		    (Z_NET_ETH_MAC_DT_CONFIG_INIT_NVMEM(node_id)),                                 \
+		    DT_NODE_HAS_PROP(node_id, local_mac_address),                                  \
+		    (Z_NET_ETH_MAC_DT_CONFIG_INIT_STATIC(node_id)),                                \
+		    (Z_NET_ETH_MAC_DT_CONFIG_INIT_DEFAULT(node_id)))
 
 /**
  * @brief Like NET_ETH_MAC_DT_CONFIG_INIT for an instance of a DT_DRV_COMPAT compatible
